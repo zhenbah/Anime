@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: scraping-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: scraping_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./docker/mongodb/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    command: mongod --quiet --logpath /dev/null
+    networks:
+      - scraping-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/scraping_db --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: scraping-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - scraping-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  scraping-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: scraping-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://admin:password@mongodb:27017/scraping_db?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - DEBUG=${DEBUG:-False}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-100}
+      - PROXY_ENABLED=${PROXY_ENABLED:-False}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - scraping-network
+    restart: unless-stopped
+
+  scraping-worker-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: scraping-worker-1
+    environment:
+      - MONGODB_URL=mongodb://admin:password@mongodb:27017/scraping_db?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - WORKER_MODE=true
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    networks:
+      - scraping-network
+    restart: unless-stopped
+    command: python -m src.scraping_system.worker
+
+  scraping-worker-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: scraping-worker-2
+    environment:
+      - MONGODB_URL=mongodb://admin:password@mongodb:27017/scraping_db?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - WORKER_MODE=true
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    networks:
+      - scraping-network
+    restart: unless-stopped
+    command: python -m src.scraping_system.worker
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  scraping-network:
+    driver: bridge

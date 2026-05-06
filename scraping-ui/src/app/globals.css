@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 3%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 7%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 240 100% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 30% 20%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 20% 15%;
+    --muted-foreground: 240 10% 60%;
+    --accent: 240 100% 65%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 20% 20%;
+    --input: 240 20% 25%;
+    --ring: 240 100% 65%;
+    --radius: 12px;
+    --chart-1: 240 100% 65%;
+    --chart-2: 160 100% 65%;
+    --chart-3: 30 100% 65%;
+    --chart-4: 280 100% 65%;
+    --chart-5: 10 100% 65%;
+  }
+
+  .light {
+    --background: 0 0% 98%;
+    --foreground: 0 0% 3%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3%;
+    --primary: 240 80% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 20% 90%;
+    --secondary-foreground: 0 0% 3%;
+    --muted: 240 20% 95%;
+    --muted-foreground: 240 10% 40%;
+    --accent: 240 80% 55%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 20% 90%;
+    --input: 240 20% 95%;
+    --ring: 240 80% 55%;
+    --chart-1: 240 80% 55%;
+    --chart-2: 160 80% 55%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 80% 55%;
+    --chart-5: 10 80% 55%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  ::selection {
+    @apply bg-primary/30;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/80 backdrop-blur-xl border border-border/50 shadow-2xl;
+  }
+
+  .glass-light {
+    @apply bg-card/60 backdrop-blur-lg border border-border/30 shadow-xl;
+  }
+
+  .gradient-text {
+    @apply bg-gradient-to-r from-primary via-purple-500 to-pink-500 bg-clip-text text-transparent;
+  }
+
+  .gradient-bg {
+    @apply bg-gradient-to-br from-primary/20 via-transparent to-purple-500/20;
+  }
+
+  .text-shadow {
+    text-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  .animate-in {
+    animation: fadeIn 0.5s ease-out forwards;
+  }
+
+  .slide-up {
+    animation: slideUp 0.3s ease-out forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-in,
+    .slide-up {
+      animation: none;
+    }
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-primary/30 rounded-full hover:bg-primary/50 transition-colors;
+}
+
+::-webkit-scrollbar-corner {
+  @apply bg-transparent;
+}
