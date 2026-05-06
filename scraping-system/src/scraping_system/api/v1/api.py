@@ -1,37 +1,38 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-import asyncio
 
-from src.scraping_system.schemas.scraping import ScrapingTask, ScrapingResult
-from src.scraping_system.schemas.data import ScrapedData, BatchProcessingResult
-from src.scraping_system.schemas.user import UserCreate, Token, APIKeyCreate
+from src.scraping_system.schemas.scraping import ScrapingTask, ScrapingResult, ScrapingMethod, Priority, CrawlStrategy
+from src.scraping_system.schemas.data import ScrapedData, BatchProcessingResult, DataSourceType
 from src.scraping_system.services.database_service import DatabaseService
 from src.scraping_system.services.fetcher_service import FetcherService
 from src.scraping_system.services.parser_engine import ParserEngine
 from src.scraping_system.services.data_processor import DataProcessor
 from src.scraping_system.services.crawler_service import CrawlerService, DistributedCrawler
-from src.scraping_system.security.auth import (
-    SecurityManager, RateLimiter, get_current_user, get_current_user_with_api_key
-)
+from src.scraping_system.services.proxy_service import ProxyManager
+from src.scraping_system.services.queue_service import QueueService
+from src.scraping_system.services.crud_service import crud
+from src.scraping_system.security.auth import get_current_user, SecurityManager
+from src.scraping_system.security.rate_limiter import RateLimiter
 from src.scraping_system.monitoring.metrics import MetricsCollector
 
 router = APIRouter()
 
-# Initialize services (will be overridden by main.py)
-db_service = DatabaseService()
-fetcher_service = FetcherService()
-parser_engine = ParserEngine()
-data_processor = DataProcessor()
-security_manager = SecurityManager(db_service)
-rate_limiter = RateLimiter(db_service)
+# Initialize services
+security_manager = SecurityManager()
+rate_limiter = RateLimiter()
 metrics_collector = MetricsCollector()
+
+# Import database routes
+from src.scraping_system.api.v1.database_routes import router as db_router
+
+# Include database routes under /api/v1
+router.include_router(db_router, prefix="", tags=["database"])
 
 @router.post("/scrape", response_model=ScrapingResult)
 async def scrape_url(
     task: ScrapingTask,
-    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user)
 ):
     """Scrape a single URL"""
@@ -74,7 +75,6 @@ async def scrape_url(
 @router.post("/scrape/batch", response_model=BatchProcessingResult)
 async def scrape_batch(
     tasks: List[ScrapingTask],
-    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user)
 ):
     """Scrape multiple URLs concurrently"""
@@ -129,16 +129,16 @@ async def scrape_batch(
 @router.post("/crawl", response_model=Dict[str, str])
 async def start_crawl(
     task: ScrapingTask,
-    background_tasks: BackgroundTasks,
+    queue_service: QueueService = Depends(lambda: QueueService(db_service)),
     user: dict = Depends(get_current_user)
 ):
     """Start a crawling job"""
     try:
-        crawler = CrawlerService(db_service)
-        task_id = await crawler.start_crawl(task)
+        # Ensure queue service is connected
+        await queue_service.connect()
         
-        # Start processing in background
-        background_tasks.add_task(crawler.process_queue, f"crawler-{task_id}")
+        crawler = CrawlerService(db_service, queue_service)
+        task_id = await crawler.start_crawl(task)
         
         return {"task_id": task_id, "status": "started"}
         
@@ -149,12 +149,15 @@ async def start_crawl(
 async def start_distributed_crawl(
     task: ScrapingTask,
     num_workers: int = Query(5, ge=1, le=20),
-    background_tasks: BackgroundTasks,
+    queue_service: QueueService = Depends(lambda: QueueService(db_service)),
     user: dict = Depends(get_current_user)
 ):
     """Start a distributed crawling job"""
     try:
-        crawler = DistributedCrawler(db_service, num_workers=num_workers)
+        # Ensure queue service is connected
+        await queue_service.connect()
+        
+        crawler = DistributedCrawler(db_service, queue_service, num_workers=num_workers)
         await crawler.start()
         await crawler.add_task(task)
         
@@ -237,11 +240,15 @@ async def get_data_item(
 
 @router.get("/queue/status")
 async def get_queue_status(
+    queue_service: QueueService = Depends(lambda: QueueService(db_service)),
     user: dict = Depends(get_current_user)
 ):
     """Get queue status"""
     try:
-        sizes = await db_service.get_queue_size()
+        # Ensure queue service is connected
+        await queue_service.connect()
+        
+        sizes = await queue_service.get_queue_size()
         return sizes
         
     except Exception as e:
@@ -249,11 +256,15 @@ async def get_queue_status(
 
 @router.get("/metrics")
 async def get_metrics(
+    queue_service: QueueService = Depends(lambda: QueueService(db_service)),
     user: dict = Depends(get_current_user)
 ):
     """Get system metrics"""
     try:
-        queue_sizes = await db_service.get_queue_size()
+        # Ensure queue service is connected
+        await queue_service.connect()
+        
+        queue_sizes = await queue_service.get_queue_size()
         metrics_collector.set_queue_size("high", queue_sizes.get("high", 0))
         metrics_collector.set_queue_size("normal", queue_sizes.get("normal", 0))
         metrics_collector.set_queue_size("low", queue_sizes.get("low", 0))

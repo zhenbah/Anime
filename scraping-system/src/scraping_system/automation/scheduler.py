@@ -270,8 +270,12 @@ class IncrementalCrawler:
     async def crawl_incremental(self, task: ScrapingTask) -> List[str]:
         """Crawl only new URLs"""
         from src.scraping_system.services.crawler_service import CrawlerService
+        from src.scraping_system.services.queue_service import QueueService
         
-        crawler = CrawlerService(self.db_service)
+        queue_service = QueueService(self.db_service)
+        await queue_service.connect()
+        
+        crawler = CrawlerService(self.db_service, queue_service)
         
         # Override max_depth for incremental crawl
         task.max_depth = 2

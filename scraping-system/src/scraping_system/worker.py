@@ -11,6 +11,7 @@ import logging
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from scraping_system.services.database_service import DatabaseService
+from scraping_system.services.queue_service import QueueService
 from scraping_system.services.crawler_service import CrawlerService
 from scraping_system.services.fetcher_service import FetcherService
 from scraping_system.services.parser_engine import ParserEngine
@@ -28,12 +29,15 @@ async def worker_main():
     db_service = DatabaseService()
     await db_service.connect()
     
+    queue_service = QueueService(db_service)
+    await queue_service.connect()
+    
     fetcher = FetcherService()
     await fetcher.initialize()
     
     parser = ParserEngine()
     processor = DataProcessor()
-    crawler = CrawlerService(db_service)
+    crawler = CrawlerService(db_service, queue_service)
     
     worker_id = os.environ.get('WORKER_ID', 'worker-1')
     
@@ -43,7 +47,7 @@ async def worker_main():
         while True:
             try:
                 # Get next item from queue
-                item = await db_service.pop_from_queue()
+                item = await queue_service.pop_from_queue()
                 
                 if not item:
                     await asyncio.sleep(1)
@@ -86,7 +90,7 @@ async def worker_main():
                         
                 else:
                     logger.error(f"Failed to fetch {url}: {result.error}")
-                
+                    
             except Exception as e:
                 logger.error(f"Worker error: {e}")
                 await asyncio.sleep(5)

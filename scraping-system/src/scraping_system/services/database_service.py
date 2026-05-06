@@ -1,90 +1,210 @@
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from redis.asyncio import Redis
-from typing import Optional
+"""
+MongoDB Database Connection Module
+
+Provides async MongoDB connection with connection pooling,
+reconnection logic, and error handling.
+"""
+
 import logging
+from typing import Optional
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from contextlib import asynccontextmanager
+import asyncio
+
+from src.scraping_system.core.config import settings
+from src.scraping_system.utils.error_handler import (
+    DatabaseErrorHandler,
+    DatabaseTransaction,
+    DatabaseHealthChecker
+)
 
 logger = logging.getLogger(__name__)
 
-class DatabaseService:
+
+class MongoDBConnection:
+    """Manages MongoDB connection with pooling and reconnection."""
+    
     def __init__(self):
         self.client: Optional[AsyncIOMotorClient] = None
         self.db: Optional[AsyncIOMotorDatabase] = None
-        self.redis: Optional[Redis] = None
-        
-    async def connect(self):
-        """Connect to MongoDB and Redis"""
-        from src.scraping_system.core.config import settings
-        
+        self._connection_lock = asyncio.Lock()
+        self._is_connected = False
+        self.error_handler = DatabaseErrorHandler()
+        self.health_checker = DatabaseHealthChecker(self)
+    
+    async def connect(self) -> None:
+        """Establish MongoDB connection with retry logic."""
+        async with self._connection_lock:
+            if self._is_connected:
+                logger.warning("MongoDB connection already established")
+                return
+                
+            max_retries = 5
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Connecting to MongoDB (attempt {attempt + 1}/{max_retries})...")
+                    
+                    # Create MongoDB client with connection pooling options
+                    self.client = AsyncIOMotorClient(
+                        settings.MONGODB_URL,
+                        maxPoolSize=50,  # Maximum number of connections in pool
+                        minPoolSize=10,   # Minimum number of connections to maintain
+                        maxIdleTimeMS=45000,  # Close idle connections after 45 seconds
+                        waitQueueTimeoutMS=5000,  # Wait up to 5 seconds for connection
+                        serverSelectionTimeoutMS=5000,  # Timeout for server selection
+                        socketTimeoutMS=45000,  # Socket timeout
+                        connectTimeoutMS=10000,  # Connection timeout
+                        retryWrites=True,
+                        w="majority",  # Write concern
+                        readPreference="primaryPreferred",
+                        uuidRepresentation="standard",
+                        appname="scraping-platform"
+                    )
+                    
+                    # Get database instance
+                    self.db = self.client[settings.MONGODB_DB]
+                    
+                    # Test connection
+                    await self.client.admin.command('ping')
+                    
+                    # Create indexes
+                    await self._create_indexes()
+                    
+                    self._is_connected = True
+                    logger.info(f"Successfully connected to MongoDB database: {settings.MONGODB_DB}")
+                    return
+                    
+                except Exception as e:
+                    logger.error(f"MongoDB connection attempt {attempt + 1} failed: {e}")
+                    
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.info(f"Retrying in {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error("Failed to connect to MongoDB after all retries")
+                        raise ConnectionError(f"Could not connect to MongoDB: {e}")
+    
+    async def disconnect(self) -> None:
+        """Close MongoDB connection."""
+        async with self._connection_lock:
+            if self.client:
+                self.client.close()
+                self._is_connected = False
+                logger.info("MongoDB connection closed")
+    
+    async def _create_indexes(self) -> None:
+        """Create indexes for optimized query performance."""
         try:
-            # MongoDB connection
-            self.client = AsyncIOMotorClient(
-                settings.MONGODB_URL,
-                serverSelectionTimeoutMS=5000
+            # Scraped Content Collection Indexes
+            await self.db.scraped_content.create_index(
+                [("title", "text"), ("description", "text")],
+                name="text_search_index",
+                default_language="english"
             )
-            self.db = self.client[settings.MONGODB_DB]
+            await self.db.scraped_content.create_index(
+                "created_at",
+                name="created_at_index",
+                expireAfterSeconds=7776000  # Auto-delete after 90 days (optional)
+            )
+            await self.db.scraped_content.create_index(
+                "source",
+                name="source_index"
+            )
+            await self.db.scraped_content.create_index(
+                [("title", 1), ("created_at", -1)],
+                name="title_created_at_index"
+            )
             
-            # Test MongoDB connection
-            await self.client.admin.command('ping')
-            logger.info("Connected to MongoDB successfully")
+            # Scrape Logs Collection Indexes
+            await self.db.scrape_logs.create_index(
+                "timestamp",
+                name="timestamp_index",
+                expireAfterSeconds=2592000  # Auto-delete logs after 30 days
+            )
+            await self.db.scrape_logs.create_index(
+                "status",
+                name="status_index"
+            )
+            await self.db.scrape_logs.create_index(
+                [("status", 1), ("timestamp", -1)],
+                name="status_timestamp_index"
+            )
             
-            # Create indexes
-            await self.create_indexes()
+            # Scraper Jobs Collection Indexes
+            await self.db.scraper_jobs.create_index(
+                "job_id",
+                name="job_id_index",
+                unique=True
+            )
+            await self.db.scraper_jobs.create_index(
+                "status",
+                name="jobs_status_index"
+            )
+            await self.db.scraper_jobs.create_index(
+                "target_site",
+                name="target_site_index"
+            )
+            await self.db.scraper_jobs.create_index(
+                [("status", 1), ("started_at", -1)],
+                name="jobs_status_started_index"
+            )
+            
+            # Users Collection Indexes
+            await self.db.users.create_index(
+                "username",
+                name="username_index",
+                unique=True
+            )
+            await self.db.users.create_index(
+                "email",
+                name="email_index",
+                unique=True
+            )
+            await self.db.users.create_index(
+                "role",
+                name="role_index"
+            )
+            
+            logger.info("Database indexes created successfully")
             
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
+            logger.error(f"Failed to create indexes: {e}")
             raise
-        
+    
+    async def is_connected(self) -> bool:
+        """Check if MongoDB connection is active."""
+        if not self._is_connected or not self.client:
+            return False
         try:
-            # Redis connection
-            self.redis = Redis.from_url(settings.REDIS_URL)
-            await self.redis.ping()
-            logger.info("Connected to Redis successfully")
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+            # Check connection by running a simple command
+            await self.client.admin.command('ping')
+            return True
+        except Exception:
+            self._is_connected = False
+            return False
     
-    async def disconnect(self):
-        """Close database connections"""
-        if self.client:
-            self.client.close()
-            logger.info("MongoDB connection closed")
+    @asynccontextmanager
+    async def get_session():
+        """Get MongoDB session for transactions."""
+        if not self.client:
+            raise ConnectionError("MongoDB client not initialized")
         
-        if self.redis:
-            await self.redis.close()
-            logger.info("Redis connection closed")
+        async with await self.client.start_session() as session:
+            try:
+                yield session
+            except Exception as e:
+                logger.error(f"Session error: {e}")
+                raise
     
-    async def create_indexes(self):
-        """Create optimized indexes for collections"""
-        # Scraped data indexes
-        await self.db.scraped_data.create_index("hash", unique=True)
-        await self.db.scraped_data.create_index("source_url")
-        await self.db.scraped_data.create_index("scraped_at")
-        await self.db.scraped_data.create_index("status")
-        await self.db.scraped_data.create_index([("title", "text"), ("content", "text")])
-        
-        # Scraping tasks indexes
-        await self.db.scraping_tasks.create_index("status")
-        await self.db.scraping_tasks.create_index("created_at")
-        await self.db.scraping_tasks.create_index("scheduled_at")
-        await self.db.scraping_tasks.create_index("priority")
-        
-        # Queue items indexes
-        await self.db.queue_items.create_index("status")
-        await self.db.queue_items.create_index("worker_id")
-        await self.db.queue_items.create_index("created_at")
-        
-        # Users indexes
-        await self.db.users.create_index("username", unique=True)
-        await self.db.users.create_index("email", unique=True)
-        
-        # API keys indexes
-        await self.db.api_keys.create_index("key", unique=True)
-        
-        logger.info("Database indexes created successfully")
+    async def transaction(self):
+        """Get a transaction context manager."""
+        return DatabaseTransaction(self)
     
-    # Scraped Data Operations
     async def insert_scraped_data(self, data: dict) -> str:
-        """Insert scraped data with deduplication"""
+        """Insert scraped data with deduplication."""
         from bson import ObjectId
         
         # Check for duplicates
@@ -97,105 +217,37 @@ class DatabaseService:
         return str(result.inserted_id)
     
     async def get_scraped_data(self, data_id: str) -> Optional[dict]:
-        """Get scraped data by ID"""
+        """Get scraped data by ID."""
         from bson import ObjectId
         return await self.db.scraped_data.find_one({"_id": ObjectId(data_id)})
     
-    async def get_scraped_data_by_url(self, url: str, limit: int = 100) -> list:
-        """Get scraped data by URL"""
-        cursor = self.db.scraped_data.find({"source_url": url}).limit(limit)
-        return await cursor.to_list(length=limit)
-    
     async def search_scraped_data(self, query: str, limit: int = 50) -> list:
-        """Full-text search on scraped data"""
+        """Full-text search on scraped data."""
         cursor = await self.db.scraped_data.find(
             {"$text": {"$search": query}}
         ).limit(limit)
         return await cursor.to_list(length=limit)
-    
-    async def get_recent_data(self, limit: int = 100) -> list:
-        """Get most recent scraped data"""
-        cursor = self.db.scraped_data.find().sort("scraped_at", -1).limit(limit)
-        return await cursor.to_list(length=limit)
-    
-    # Queue Operations
-    async def push_to_queue(self, task: dict, priority: str = "normal") -> str:
-        """Push task to Redis queue"""
-        from src.scraping_system.schemas.scraping import ScrapingTask
-        from datetime import datetime
-        import uuid
-        
-        queue_name = f"scraping_queue:{priority}"
-        item = {
-            "id": str(uuid.uuid4()),
-            "task": task.dict() if hasattr(task, "dict") else task,
-            "status": "pending",
-            "created_at": datetime.utcnow().isoformat(),
-            "priority": priority
-        }
-        
-        # Store in Redis
-        await self.redis.lpush(queue_name, str(item))
-        
-        # Also store in MongoDB for persistence
-        result = await self.db.queue_items.insert_one(item)
-        return item["id"]
-    
-    async def pop_from_queue(self, priority: str = "high") -> Optional[dict]:
-        """Pop task from Redis queue"""
-        # Try high priority first, then normal, then low
-        priorities = ["critical", "high", "normal", "low"]
-        
-        for pri in priorities:
-            queue_name = f"scraping_queue:{pri}"
-            item = await self.redis.rpop(queue_name)
-            if item:
-                import json
-                return json.loads(item)
-        
-        return None
-    
-    async def get_queue_size(self) -> dict:
-        """Get queue sizes for all priorities"""
-        sizes = {}
-        for priority in ["critical", "high", "normal", "low"]:
-            queue_name = f"scraping_queue:{priority}"
-            sizes[priority] = await self.redis.llen(queue_name)
-        return sizes
-    
-    # Task Operations
-    async def create_task(self, task: dict) -> str:
-        """Create a new scraping task"""
-        result = await self.db.scraping_tasks.insert_one(task)
-        return str(result.inserted_id)
-    
-    async def update_task_status(self, task_id: str, status: str):
-        """Update task status"""
-        from bson import ObjectId
-        await self.db.scraping_tasks.update_one(
-            {"_id": ObjectId(task_id)},
-            {"$set": {"status": status, "updated_at": datetime.utcnow()}}
-        )
-    
-    # Cache Operations
-    async def set_cache(self, key: str, value: str, ttl: int = 3600):
-        """Set cache value with TTL"""
-        await self.redis.setex(key, ttl, value)
-    
-    async def get_cache(self, key: str) -> Optional[str]:
-        """Get cache value"""
-        return await self.redis.get(key)
-    
-    async def delete_cache(self, key: str):
-        """Delete cache value"""
-        await self.redis.delete(key)
-    
-    # Metrics
-    async def increment_metric(self, metric_name: str, value: int = 1):
-        """Increment a metric counter"""
-        await self.redis.hincrby("metrics", metric_name, value)
-    
-    async def get_metrics(self) -> dict:
-        """Get all metrics"""
-        metrics = await self.redis.hgetall("metrics")
-        return {k.decode(): int(v.decode()) for k, v in metrics.items()}
+
+
+# Global database connection instance
+db_connection = MongoDBConnection()
+
+# Alias for backward compatibility
+DatabaseService = MongoDBConnection
+
+
+def get_db() -> MongoDBConnection:
+    """Get database connection instance."""
+    return db_connection
+
+
+async def get_database() -> AsyncIOMotorDatabase:
+    """Get MongoDB database instance."""
+    if not db_connection.db:
+        raise ConnectionError("Database not connected")
+    return db_connection.db
+
+
+async def health_check() -> dict:
+    """Perform database health check."""
+    return await db_connection.health_checker.check_connection()

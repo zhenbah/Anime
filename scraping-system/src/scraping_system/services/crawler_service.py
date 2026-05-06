@@ -6,26 +6,39 @@ import random
 import time
 
 from src.scraping_system.services.database_service import DatabaseService
+from src.scraping_system.services.queue_service import QueueService
+from src.scraping_system.services.crud_service import crud
 from src.scraping_system.schemas.scraping import ScrapingTask, Priority, CrawlStrategy
 
 logger = logging.getLogger(__name__)
 
+
 class CrawlerService:
     """Distributed crawler with queue-based architecture"""
     
-    def __init__(self, db_service: DatabaseService):
+    def __init__(self, db_service: DatabaseService, queue_service: Optional[QueueService] = None):
         self.db_service = db_service
+        self.queue_service = queue_service or QueueService(db_service)
         self.visited_urls = set()
         self.max_depth = 3
         self.domain_limits = {}  # Rate limiting per domain
         
+    async def _ensure_queue_service(self):
+        """Ensure queue service is connected."""
+        if not self.queue_service._is_connected:
+            await self.queue_service.connect()
+        
     async def start_crawl(self, task: ScrapingTask) -> str:
         """Start a new crawling job"""
-        task_id = await self.db_service.create_task(task.dict())
+        # Ensure queue service is connected
+        await self._ensure_queue_service()
+        
+        # Create task in database
+        task_id = await crud.create_task(task.dict())
         
         # Add initial URL to queue
-        await self.db_service.push_to_queue(
-            {"task": task.dict(), "url": str(task.url), "depth": 0},
+        await self.queue_service.push_to_queue(
+            {"task": task.dict(), "url": str(task.url), "depth": 0, "task_id": task_id},
             priority=task.priority.value
         )
         
@@ -34,12 +47,15 @@ class CrawlerService:
     
     async def process_queue(self, worker_id: str):
         """Process items from the queue"""
+        # Ensure queue service is connected
+        await self._ensure_queue_service()
+        
         logger.info(f"Worker {worker_id} started processing queue")
         
         while True:
             try:
                 # Get next item from queue
-                item = await self.db_service.pop_from_queue()
+                item = await self.queue_service.pop_from_queue()
                 
                 if not item:
                     await asyncio.sleep(1)
@@ -84,12 +100,13 @@ class CrawlerService:
             new_links = await self._discover_links(task)
             
             for link in new_links:
-                await self.db_service.push_to_queue(
+                await self.queue_service.push_to_queue(
                     {
                         "task": task_data,
                         "url": link,
                         "depth": depth + 1,
-                        "parent_url": url
+                        "parent_url": url,
+                        "task_id": task_data.get("task_id", task_id)
                     },
                     priority=task.priority.value
                 )
@@ -196,27 +213,34 @@ class CrawlerService:
     
     async def get_crawl_stats(self) -> Dict[str, Any]:
         """Get crawling statistics"""
+        # Ensure queue service is connected
+        await self._ensure_queue_service()
+        
         return {
             "visited_urls": len(self.visited_urls),
-            "queue_sizes": await self.db_service.get_queue_size(),
+            "queue_sizes": await self.queue_service.get_queue_size(),
             "domain_limits": len(self.domain_limits)
         }
 
 class DistributedCrawler:
     """Manages multiple crawler workers"""
     
-    def __init__(self, db_service: DatabaseService, num_workers: int = 5):
+    def __init__(self, db_service: DatabaseService, queue_service: Optional[QueueService] = None, num_workers: int = 5):
         self.db_service = db_service
+        self.queue_service = queue_service or QueueService(db_service)
         self.num_workers = num_workers
         self.workers = []
         self.running = False
         
     async def start(self):
         """Start all crawler workers"""
+        # Ensure queue service is connected
+        await self.queue_service.connect()
+        
         self.running = True
         
         for i in range(self.num_workers):
-            worker = CrawlerService(self.db_service)
+            worker = CrawlerService(self.db_service, self.queue_service)
             self.workers.append(worker)
             
             # Start worker task
@@ -234,7 +258,7 @@ class DistributedCrawler:
     
     async def add_task(self, task: ScrapingTask):
         """Add a new crawling task"""
-        crawler = CrawlerService(self.db_service)
+        crawler = CrawlerService(self.db_service, self.queue_service)
         await crawler.start_crawl(task)
     
     async def get_stats(self) -> Dict[str, Any]:
